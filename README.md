@@ -9,6 +9,19 @@ The contract in `src/BZPX.sol` is the standard `OFT` from `@layerzerolabs/oft-ev
 
 The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`.
 
+## Chains
+
+BZPX moves between six chains, every one a peer of every other. The supply is minted on Base only. Nothing is deployed yet; the values below are the ones `config/network.json` holds and the deploy scripts read.
+
+| Chain | Chain id | LayerZero endpoint id | Outbound block confirmations |
+|---|---|---|---|
+| Base | 8453 | 30184 | 10 |
+| Robinhood Chain | 4663 | 30416 | 5 |
+| Optimism | 10 | 30111 | 20 |
+| Arbitrum One | 42161 | 30110 | 20 |
+| Ethereum | 1 | 30101 | 15 |
+| Avalanche C-Chain | 43114 | 30106 | 12 |
+
 ## Layout
 
 | Path | Content |
