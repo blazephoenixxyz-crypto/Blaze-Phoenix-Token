@@ -67,6 +67,14 @@ step "wire cancelled" 0 "$TK"$'\nno\n' wire
 step "status still incomplete" 3 "" status
 step "wire on both chains" 0 "$TK"$'\nWIRE\n' wire
 step "status complete" 0 "" status
+# a pinned DVN without code fails every command closed, by role (the gate alone compares the config with itself)
+DVN=$(node -e "console.log(require('$NETWORK').chains.base.dvns[0])")
+DVN_CODE=$(cast code "$DVN" --rpc-url "$RPC_BASE")
+cast rpc anvil_setCode "$DVN" 0x --rpc-url "$RPC_BASE" > /dev/null
+step "status refuses a pinned DVN without code" 1 "" status
+grep -q "dvn .* $DVN has no code" "$W/step$n.txt" && echo "         no code: the fault names the DVN OK" || echo "         no code: the fault names the DVN FAILED"
+cast rpc anvil_setCode "$DVN" "$DVN_CODE" --rpc-url "$RPC_BASE" > /dev/null
+step "status complete again once the DVN has code" 0 "" status
 step "repeated wire does nothing" 0 "$TK"$'\nWIRE\n' wire
 step "send base->robinhood 1000" 0 "$TK"$'\nSEND\n' send base 1000
 deliver base

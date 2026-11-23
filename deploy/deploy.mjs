@@ -16,7 +16,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
-import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, meshGate, coherence } from "./mesh.mjs";
+import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const NETWORK = JSON.parse(fs.readFileSync(path.join(HERE, "..", "config", "network.json"), "utf8"));
@@ -122,6 +122,12 @@ async function chain1(name) {
   if ((await provider.getCode(cfg.endpoint)) === "0x") throw new Error(`${name}: endpoint has no code`);
   const eid = Number(await ep.eid());
   if (eid !== cfg.eid) throw new Error(`${name}: endpoint.eid() = ${eid}, expected ${cfg.eid}`);
+  // libs, executor and DVNs of network.json must exist on this chain: the gate only compares them with themselves
+  const codes = Object.fromEntries(
+    await Promise.all(configAddresses(cfg).map(async ([, a]) => [a.toLowerCase(), await provider.getCode(a)])),
+  );
+  const faults = codeFaults(name, cfg, codes);
+  if (faults.length) throw new Error(faults.join("; ")); // "no code": not retried by chain()
   return { name, cfg, rpc, provider, ep };
 }
 

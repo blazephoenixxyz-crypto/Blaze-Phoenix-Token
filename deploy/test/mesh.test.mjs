@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { MSG_SEND, MSG_SEND_AND_CALL, directions, expected, evaluate, meshGate, ulnEqual, coherence } from "../mesh.mjs";
+import * as mesh from "../mesh.mjs"; // producers added after the first release: a missing export fails its test, not the file
 
 const NETWORK = JSON.parse(fs.readFileSync(new URL("../../config/network.json", import.meta.url), "utf8"));
 const ORDER = NETWORK.order;
@@ -157,4 +158,43 @@ test("a direction never read (chain without deploy) is refused", () => {
 test("wrong peer is refused", () => {
   const [L, R] = [ORDER[1], ORDER[2]];
   assert.deepEqual(one(L, R, () => ({ peer: peerHex(ADDR[ORDER[3]]) })), [`${L} -> ${R}: peer`]);
+});
+
+// F4: every address the config pins must have code on its chain. The roles below are written LITERALLY from network.json
+// (not from configAddresses), so a role dropped from the producer turns its vector red. Mutants: M1 drop a role,
+// M2 accept a never-probed address (`!== "0x"`).
+const rolesOf = (n) => [
+  ["sendLib", C[n].sendLib],
+  ["receiveLib", C[n].receiveLib],
+  ["executor", C[n].executor],
+  ...C[n].dvns.map((a, i) => [`dvn ${C[n].dvnNames[i]}`, a]),
+];
+const CODE = "0x6080";
+
+test("a pinned config address without code is refused by role, on every chain (F4)", () => {
+  for (const n of ORDER) {
+    const roles = rolesOf(n);
+    const all = Object.fromEntries(roles.map(([, a]) => [a.toLowerCase(), CODE]));
+    assert.deepEqual(mesh.codeFaults(n, C[n], all), [], `${n}: every address with code passes`);
+    for (const [role, a] of roles) {
+      const want = [`${n}: ${role} ${a} has no code`];
+      assert.deepEqual(mesh.codeFaults(n, C[n], { ...all, [a.toLowerCase()]: "0x" }), want, `${n} ${role}: empty code`);
+      const unprobed = { ...all };
+      delete unprobed[a.toLowerCase()];
+      assert.deepEqual(mesh.codeFaults(n, C[n], unprobed), want, `${n} ${role}: never probed`);
+      assert.deepEqual(mesh.codeFaults(n, C[n], { ...all, [a.toLowerCase()]: null }), want, `${n} ${role}: null read`);
+    }
+    // every address at once: one fault per role, in role order
+    assert.deepEqual(mesh.codeFaults(n, C[n], {}), roles.map(([role, a]) => `${n}: ${role} ${a} has no code`));
+  }
+});
+
+test("the probed addresses cover every address that wire writes and the gate compares (F4 parity)", () => {
+  for (const [L, R] of directions(ORDER)) {
+    const probed = new Set(mesh.configAddresses(C[L]).map(([, a]) => a.toLowerCase()));
+    const e = expected(C[L], C[R], NETWORK.lzReceiveGas);
+    for (const a of [C[L].sendLib, C[L].receiveLib, e.exec[1], ...e.sendUln[4], ...e.recvUln[4], ...e.sendUln[5], ...e.recvUln[5]])
+      assert.ok(probed.has(a.toLowerCase()), `${L}>${R}: ${a} is not probed`);
+  }
+  for (const n of ORDER) assert.deepEqual(mesh.configAddresses(C[n]), rolesOf(n), n);
 });

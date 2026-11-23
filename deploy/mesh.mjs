@@ -3,6 +3,8 @@
 //   expected(loc, rem, gas)       config required for the path loc -> rem
 //   evaluate(read, e, peer)       conforming / non-conforming items of ONE direction, from the raw reads
 //   meshGate(results, order)      renounce gate: list of faults; empty only if all N·(N−1) directions conform
+//   configAddresses(cfg)          every address the config pins on one chain, by role (libs, executor, DVNs)
+//   codeFaults(name, cfg, codes)  one fault per pinned address without code (or never probed) on that chain
 import { ethers } from "ethers";
 
 export const MSG_SEND = 1; // OFTMsgCodec SEND
@@ -99,4 +101,25 @@ export function meshGate(results, order) {
     if (f.length) faults.push(`${loc} -> ${rem}: ${f.join(", ")}`);
   }
   return faults;
+}
+
+/// Every address network.json pins on one chain, by role: what wire writes and the gate compares (expected/evaluate).
+/// The gate compares the on-chain config with these same values, so it cannot tell whether they exist: codeFaults does.
+export function configAddresses(cfg) {
+  return [
+    ["sendLib", cfg.sendLib],
+    ["receiveLib", cfg.receiveLib],
+    ["executor", cfg.executor],
+    ...cfg.dvns.map((a, i) => [`dvn ${cfg.dvnNames[i]}`, a]),
+  ];
+}
+
+/// codes: lower-case address -> eth_getCode result. An address never probed counts as without code (absent is not empty).
+export function codeFaults(name, cfg, codes) {
+  return configAddresses(cfg)
+    .filter(([, a]) => {
+      const code = codes[a.toLowerCase()];
+      return !(typeof code === "string" && code.length > 2);
+    })
+    .map(([role, a]) => `${name}: ${role} ${a} has no code`);
 }
