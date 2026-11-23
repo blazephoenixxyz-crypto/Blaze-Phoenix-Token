@@ -48,8 +48,12 @@ function itemsOf(ls) {
   }
   return res;
 }
-// gate as deploy.mjs runs it: meshGate over the 30 directions plus coherence over config and raw reads
-const gate = (ls, net = NETWORK) => meshGate(itemsOf(ls), ORDER).concat(coherence(net, ORDER, ls));
+// per-chain OApp state, literal: network.json declares no msgInspector and no preCrime, so both must read as zero
+const ZERO = "0x0000000000000000000000000000000000000000";
+const oappRead = (o = {}) => ({ msgInspector: ZERO, preCrime: ZERO, ...o });
+const oappItems = (mut = () => ({})) => new Map(ORDER.map((n) => [n, (mesh.evaluateOApp ?? (() => ({})))(oappRead(mut(n)))]));
+// gate as deploy.mjs runs it: meshGate over the 30 directions and the per-chain OApp state, plus coherence over config and raw reads
+const gate = (ls, net = NETWORK, oapp = oappItems()) => meshGate(itemsOf(ls), ORDER, oapp).concat(coherence(net, ORDER, ls));
 const one = (L, R, o) => gate(reads((l, r) => (l === L && r === R ? o(l, r) : {})));
 
 test("six chains give 30 directions", () => {
@@ -152,7 +156,7 @@ test("enforced gas one below, one above, and msgType 1 missing are refused (G6)"
 test("a direction never read (chain without deploy) is refused", () => {
   const r = itemsOf(reads());
   r.delete(`${ORDER[3]}>${ORDER[2]}`);
-  assert.deepEqual(meshGate(r, ORDER), [`${ORDER[3]} -> ${ORDER[2]}: not read`]);
+  assert.deepEqual(meshGate(r, ORDER, oappItems()), [`${ORDER[3]} -> ${ORDER[2]}: not read`]);
 });
 
 test("wrong peer is refused", () => {
@@ -197,4 +201,22 @@ test("the probed addresses cover every address that wire writes and the gate com
       assert.ok(probed.has(a.toLowerCase()), `${L}>${R}: ${a} is not probed`);
   }
   for (const n of ORDER) assert.deepEqual(mesh.configAddresses(C[n]), rolesOf(n), n);
+});
+
+// F2: owner-settable OApp slots outside the directions. Mutants: M1 evaluateOApp without msgInspector, M2 without
+// preCrime, M3 meshGate skips a chain whose state was not read, M4 renounceGate does not pass the map (rehearsal).
+test("an OApp slot no direction covers is refused: msgInspector, preCrime, and a chain never read (F2)", () => {
+  assert.deepEqual(gate(reads(), NETWORK, oappItems()), [], "both zero on every chain passes");
+  for (const n of ORDER) {
+    const only = (o) => gate(reads(), NETWORK, oappItems((m) => (m === n ? o : {})));
+    assert.deepEqual(only({ msgInspector: OTHER }), [`${n}: msgInspector`], `${n} inspector`);
+    assert.deepEqual(only({ preCrime: OTHER }), [`${n}: preCrime`], `${n} preCrime`);
+    assert.deepEqual(only({ msgInspector: OTHER, preCrime: OTHER }), [`${n}: msgInspector, preCrime`], `${n} both`);
+    assert.deepEqual(only({ msgInspector: undefined }), [`${n}: msgInspector`], `${n} field missing`);
+    const missing = oappItems();
+    missing.delete(n);
+    assert.deepEqual(gate(reads(), NETWORK, missing), [`${n}: OApp state not read`], `${n} never read`);
+  }
+  // no map at all: every chain is unread, the gate fails closed
+  assert.equal(meshGate(itemsOf(reads()), ORDER).length, ORDER.length);
 });

@@ -81,6 +81,11 @@ deliver base
 step "send robinhood->base 400" 0 "$TK"$'\nSEND\n' send robinhood 400
 deliver robinhood
 step "status after round trip" 0 "" status
+# an owner-set msgInspector would be frozen by the renounce: the gate refuses it and wire resets it
+AB0=$(node -e "console.log(require('$BZPX_ADDRESSES').base.address)")
+cast send "$AB0" 'setMsgInspector(address)' 0x00000000000000000000000000000000000000ff --private-key "$TK" --rpc-url "$RPC_BASE" > /dev/null
+step "renounce refuses while a msgInspector is set" 1 "" renounce
+step "wire resets the msgInspector" 0 "$TK"$'\nWIRE\n' wire
 step "renounce cancelled" 0 "$TK"$'\nrenounce\n' renounce
 step "renounce" 0 "$TK"$'\nRENOUNCE FOREVER\n' renounce
 step "status after renounce" 0 "" status

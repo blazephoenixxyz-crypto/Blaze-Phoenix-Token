@@ -2,7 +2,9 @@
 //   directions(order)             all ordered pairs (loc, rem), loc != rem: N·(N−1) directions (6 chains: 30)
 //   expected(loc, rem, gas)       config required for the path loc -> rem
 //   evaluate(read, e, peer)       conforming / non-conforming items of ONE direction, from the raw reads
-//   meshGate(results, order)      renounce gate: list of faults; empty only if all N·(N−1) directions conform
+//   evaluateOApp(read)            owner-settable OApp state outside the directions (msgInspector, preCrime), per chain
+//   meshGate(results, order, oapp) renounce gate: list of faults; empty only if all N·(N−1) directions and every
+//                                 chain's OApp state conform
 //   configAddresses(cfg)          every address the config pins on one chain, by role (libs, executor, DVNs)
 //   codeFaults(name, cfg, codes)  one fault per pinned address without code (or never probed) on that chain
 import { ethers } from "ethers";
@@ -88,8 +90,18 @@ export function coherence(network, order, reads = new Map()) {
   return faults;
 }
 
-/// results: Map "loc>rem" -> items (from evaluate). Fault = a direction without a result or with a false item.
-export function meshGate(results, order) {
+/// read = { msgInspector, preCrime }. network.json declares neither, so the required value of both is zero; a field
+/// missing from the read is a fault.
+export function evaluateOApp(r) {
+  return {
+    msgInspector: eq(r.msgInspector, ethers.ZeroAddress),
+    preCrime: eq(r.preCrime, ethers.ZeroAddress),
+  };
+}
+
+/// results: Map "loc>rem" -> items (from evaluate); oapp: Map chain -> items (from evaluateOApp).
+/// Fault = a direction or a chain without a result, or with a false item.
+export function meshGate(results, order, oapp = new Map()) {
   const faults = [];
   for (const [loc, rem] of directions(order)) {
     const items = results.get(`${loc}>${rem}`);
@@ -99,6 +111,15 @@ export function meshGate(results, order) {
     }
     const f = Object.entries(items).filter(([, v]) => v !== true).map(([k]) => k);
     if (f.length) faults.push(`${loc} -> ${rem}: ${f.join(", ")}`);
+  }
+  for (const name of order) {
+    const items = oapp.get(name);
+    if (!items) {
+      faults.push(`${name}: OApp state not read`);
+      continue;
+    }
+    const f = Object.entries(items).filter(([, v]) => v !== true).map(([k]) => k);
+    if (f.length) faults.push(`${name}: ${f.join(", ")}`);
   }
   return faults;
 }

@@ -56,6 +56,8 @@ forge verify-contract <address> src/BZPX.sol:BZPX --show-standard-json-input > d
 
 Rehearse first with `bash deploy/rehearsal/rehearsal.sh <work-dir>`.
 
+The renounce gate reads every owner-settable slot that can be read without enumeration: the LayerZero config and peer of each direction in `config/network.json`, and `msgInspector` and `preCrime` on each chain. Peers and enforced options for endpoint ids outside `config/network.json` are not enumerable on-chain and are not covered.
+
 ## License
 
 Business Source License 1.1, see [LICENSE](LICENSE). Change Date 2030-06-01, Change License GPL-2.0-or-later.

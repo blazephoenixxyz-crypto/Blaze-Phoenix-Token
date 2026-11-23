@@ -16,7 +16,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
-import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
+import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, evaluateOApp, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const NETWORK = JSON.parse(fs.readFileSync(path.join(HERE, "..", "config", "network.json"), "utf8"));
@@ -156,6 +156,12 @@ async function readConfig(c, token, remName, remAddress) {
   return { expected: e, items: evaluate(read, e, c.cfg, remAddress), read };
 }
 
+/// Owner-settable OApp state outside the directions (what "wire" resets and what "status" and the gate check): see mesh.mjs.
+async function readOApp(token) {
+  const [msgInspector, preCrime] = await Promise.all([token.msgInspector(), token.preCrime()]);
+  return { msgInspector, preCrime };
+}
+
 async function waitTx(promise, desc) {
   const tx = await promise;
   console.log(`  ${desc}: tx ${tx.hash}`);
@@ -200,6 +206,9 @@ async function status() {
       console.log(`  ${f.length ? "MISSING " : "OK      "} -> ${remName}${f.length ? ": " + f.join(", ") : ""}`);
       if (f.length) all = false;
     }
+    const fo = Object.entries(evaluateOApp(await readOApp(t))).filter(([, ok]) => !ok).map(([k]) => k);
+    console.log(`  ${fo.length ? "MISSING " : "OK      "} OApp state${fo.length ? ": " + fo.join(", ") : " (msgInspector, preCrime)"}`);
+    if (fo.length) all = false;
   }
   console.log(`\nsum of supplies: ${fmt(sum)} BZPX ${sum <= SUPPLY ? "(<= 1e9 OK)" : "(> 1e9 !!!)"}`);
   console.log(all ? `config complete on all ${directions(ORDER).length} directions.` : "config incomplete: run ./bzpx.sh wire");
@@ -336,6 +345,15 @@ async function wire() {
     const [own, del] = await Promise.all([t.owner(), c.ep.delegates(oapp)]);
     if (!eq(own, w.address) || !eq(del, w.address))
       throw new Error(`${name}: owner ${own} / delegate ${del} are not this wallet; cannot configure`);
+    const oappItems = evaluateOApp(await readOApp(t));
+    const otxs = [];
+    if (!oappItems.msgInspector) otxs.push(["setMsgInspector(0)", () => t.setMsgInspector(ethers.ZeroAddress)]);
+    if (!oappItems.preCrime) otxs.push(["setPreCrime(0)", () => t.setPreCrime(ethers.ZeroAddress)]);
+    if (otxs.length) {
+      console.log(`\n== ${name}: ${otxs.length} transactions (OApp state)`);
+      for (const [d] of otxs) console.log(`   - ${d}`);
+    }
+    plans.push({ name, c, t, txs: otxs, remName: null });
     for (const remName of others(name)) {
       const rem = NETWORK.chains[remName];
       const { expected: e, items } = await readConfig(c, t, remName, addrs[remName].address);
@@ -365,23 +383,25 @@ async function wire() {
     }
   }
   if (plans.every((p) => p.txs.length === 0)) return console.log("\neverything is already wired.");
-  await confirm(`\nThis sets the LayerZero config and wires the ${plans.length} directions.`, "WIRE");
+  const nDirs = plans.filter((p) => p.remName).length;
+  await confirm(`\nThis sets the LayerZero config and wires the ${nDirs} directions.`, "WIRE");
   for (const p of plans) {
-    console.log(`\n${p.name} -> ${p.remName}:`);
+    if (p.txs.length === 0) continue;
+    console.log(`\n${p.name}${p.remName ? " -> " + p.remName : ""}:`);
     for (const [d, f] of p.txs) await waitTx(f(), d);
   }
   let ok = true;
   for (const p of plans) {
-    const r = await readConfig(p.c, p.t, p.remName, addrs[p.remName].address);
-    for (const [k, v] of Object.entries(r.items)) {
+    const items = p.remName ? (await readConfig(p.c, p.t, p.remName, addrs[p.remName].address)).items : evaluateOApp(await readOApp(p.t));
+    for (const [k, v] of Object.entries(items)) {
       if (!v) {
         ok = false;
-        console.log(`${p.name} -> ${p.remName}: MISSING ${k}`);
+        console.log(`${p.name}${p.remName ? " -> " + p.remName : ""}: MISSING ${k}`);
       }
     }
   }
   if (!ok) throw new Error("after wire the config still does not check out");
-  console.log(`\nwired and checked on the ${plans.length} directions. Next: ./bzpx.sh send base 1 <chain> (and the return from each chain)`);
+  console.log(`\nwired and checked on the ${nDirs} directions. Next: ./bzpx.sh send base 1 <chain> (and the return from each chain)`);
 }
 
 async function send(args) {
@@ -414,11 +434,13 @@ async function send(args) {
   console.log(`track: https://layerzeroscan.com/tx/${r.hash}\n       (API: https://scan.layerzero-api.com/v1/messages/tx/${r.hash})`);
 }
 
-/// Renounce gate: reads the N·(N−1) directions (6 chains: 30) and returns the faults; empty only if all conform,
-/// including msgType 1 AND 2 enforcedOptions. A partial renounce would freeze the mesh forever.
+/// Renounce gate: reads the N·(N−1) directions (6 chains: 30) and each chain's OApp state (msgInspector, preCrime) and
+/// returns the faults; empty only if all conform, including msgType 1 AND 2 enforcedOptions. A partial renounce would
+/// freeze the mesh forever.
 async function renounceGate(addrs) {
   const results = new Map();
   const reads = new Map();
+  const oapp = new Map();
   const faults = [];
   const chains = {};
   for (const name of ORDER) {
@@ -428,6 +450,7 @@ async function renounceGate(addrs) {
     }
     chains[name] = await chain(name);
     const t = new ethers.Contract(addrs[name].address, ART.abi, chains[name].provider);
+    oapp.set(name, evaluateOApp(await readOApp(t)));
     for (const remName of others(name)) {
       if (!addrs[remName]?.address) continue; // the direction stays "not read" in the gate
       const { items, read } = await readConfig(chains[name], t, remName, addrs[remName].address);
@@ -435,7 +458,7 @@ async function renounceGate(addrs) {
       reads.set(`${name}>${remName}`, read);
     }
   }
-  return { faults: faults.concat(meshGate(results, ORDER), coherence(NETWORK, ORDER, reads)), chains };
+  return { faults: faults.concat(meshGate(results, ORDER, oapp), coherence(NETWORK, ORDER, reads)), chains };
 }
 
 async function renounce(args) {
@@ -448,7 +471,7 @@ async function renounce(args) {
     for (const f of faults) console.log(`  MISSING ${f}`);
     throw new Error(`renounce gate: ${faults.length} fault(s) on the ${n} directions. After renouncing nothing can be fixed. Run wire first.`);
   }
-  console.log(`renounce gate: the ${n} directions check out (libs, executor, DVNs, confirmations, msgType 1 and 2 gas, peers).`);
+  console.log(`renounce gate: the ${n} directions check out (libs, executor, DVNs, confirmations, msgType 1 and 2 gas, peers; msgInspector, preCrime).`);
   if (!execute) return console.log("read-only: nothing was sent. Renouncing only runs with: renounce --execute");
   const w = readKey();
   const targets = [];
