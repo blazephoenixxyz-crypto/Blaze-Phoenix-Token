@@ -218,7 +218,7 @@ contract Handler6 is Test {
         }
     }
 
-    /// parkedCount on each chain == records still open for that chain (what the renounce gate reads).
+    /// parkedCount on each chain == records for that chain not yet claimed or burned (what the renounce gate reads).
     function checkParkedCount() external view {
         for (uint256 d; d < N; d++) {
             uint256 n;
