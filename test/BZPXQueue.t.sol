@@ -759,3 +759,23 @@ contract BZPXParkedCountTest is BZPXParkBase {
         assertLt(g, LZ_RECEIVE_GAS, "park path above the enforced gas");
     }
 }
+
+/// @notice After transferOwnership the former owner can no longer burn a parked packet; the new owner can (5342).
+contract BZPXTransferParkTest is BZPXParkBase {
+    function test_transferOwnership_formerOwnerCannotBurnParked() public {
+        address next = makeAddr("next");
+        uint256 t0 = block.timestamp;
+        _deliver(user, CAP, "");
+        (uint64 n, bytes32 g) = _deliver(user, 1_000e18, "");
+        IBZPXPark.ParkedPacket memory p = _pk(n, g, user, 1_000e18, t0 + 9, "");
+        vm.prank(owner);
+        b.transferOwnership(next);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(NOT_DELEGATE, owner));
+        _ip(b).burnParked(p);
+        vm.prank(next);
+        _ip(b).burnParked(p);
+        assertFalse(_ip(b).parked(_key(p)), "new owner could not burn");
+    }
+}
+

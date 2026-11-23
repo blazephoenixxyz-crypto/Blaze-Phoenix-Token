@@ -25,6 +25,7 @@ interface IEndpointV2Delegates {
 ///            INBOUND_CAP is rejected without credit or debt: a send above INBOUND_CAP reverts on the source chain.
 /// @dev owner_ is both the Ownable owner and the endpoint delegate. A full renounce needs
 ///      setDelegate(address(0)) and then renounceOwnership(): the delegate survives renounceOwnership().
+///      transferOwnership moves the delegate to the new owner.
 contract BZPX is OFT {
     uint256 public constant MAIN_CHAIN_ID = 8453;
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
@@ -107,6 +108,13 @@ contract BZPX is OFT {
         uint256 level = _level(p_.srcEid);
         inbound[p_.srcEid] = Inbound(uint192(level > p_.amountLD ? level - p_.amountLD : 0), uint64(block.timestamp));
         emit ParkedBurned(key);
+    }
+
+    /// @dev The endpoint delegate follows the owner on transfer, so a former owner keeps no power on the endpoint
+    ///      or over parked packets. renounceOwnership() is unchanged: see the contract @dev above.
+    function transferOwnership(address newOwner_) public override onlyOwner {
+        super.transferOwnership(newOwner_);
+        endpoint.setDelegate(newOwner_);
     }
 
     function _debitView(

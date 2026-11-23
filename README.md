@@ -7,7 +7,7 @@ The contract in `src/BZPX.sol` is the standard `OFT` from `@layerzerolabs/oft-ev
 1. **Fixed supply.** `TOTAL_SUPPLY` (1,000,000,000 BZPX, 18 decimals) is minted once, in the constructor, and only on `MAIN_CHAIN_ID` (Base, 8453). On every other chain the supply starts at zero and grows only with packets from peers, which burn the same amount on the source chain.
 2. **Inbound cap.** The amount credited from one source endpoint id is limited to `INBOUND_CAP` (10,000,000 BZPX) per `INBOUND_WINDOW` (1 day); capacity refills linearly. A delivery above the available capacity never reverts: the packet is parked with a release time (FIFO per source eid) and anyone can claim it once released. The endpoint delegate can burn a parked packet, which refunds its capacity. A send above `INBOUND_CAP` reverts on the source chain.
 
-The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`.
+The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`. `transferOwnership` moves the delegate to the new owner.
 
 ## Layout
 
