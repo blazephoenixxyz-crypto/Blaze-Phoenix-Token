@@ -7,6 +7,7 @@
 //   gateOApp(read)                evaluateOApp + queueItems: the per-chain items the renounce gate reads
 //   meshGate(results, order, oapp) renounce gate: list of faults; empty only if all N·(N−1) directions and every
 //                                 chain's OApp state conform
+//   lateGate(reads, order, addrs) parked queue and peers read again after the renounce confirmation: list of faults
 //   configAddresses(cfg)          every address the config pins on one chain, by role (libs, executor, DVNs)
 //   codeFaults(name, cfg, codes)  one fault per pinned address without code (or never probed) on that chain
 import { ethers } from "ethers";
@@ -133,6 +134,22 @@ export function meshGate(results, order, oapp = new Map()) {
       continue;
     }
     const f = Object.entries(items).filter(([, v]) => v !== true).map(([k]) => k);
+    if (f.length) faults.push(`${name}: ${f.join(", ")}`);
+  }
+  return faults;
+}
+
+/// reads: Map chain -> { parkedCount, peers: { remote: bytes32 } }, read again after the operator's confirmation and
+/// before the first renounce transaction; addrs: { chain: address }. A packet can park, or the owner can move a peer,
+/// while the operator reads the warning. Fault = a parked packet, a peer that is not the recorded remote, or a value
+/// not read. This narrows the window to the transactions themselves; it does not close it (README, renounce).
+export function lateGate(reads, order, addrs) {
+  const faults = [];
+  for (const [name, r] of reads) {
+    const f = queueItems(r).parkedQueueEmpty ? [] : ["parkedQueueEmpty"];
+    for (const rem of order) {
+      if (rem !== name && !(addrs[rem] && eq(r.peers?.[rem], b32(addrs[rem])))) f.push(`peer ${rem}`);
+    }
     if (f.length) faults.push(`${name}: ${f.join(", ")}`);
   }
   return faults;

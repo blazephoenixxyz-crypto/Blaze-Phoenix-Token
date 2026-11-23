@@ -16,7 +16,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
-import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, evaluateOApp, gateOApp, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
+import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, evaluateOApp, gateOApp, meshGate, lateGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const NETWORK = JSON.parse(fs.readFileSync(path.join(HERE, "..", "config", "network.json"), "utf8"));
@@ -504,6 +504,15 @@ WHAT IS LOST FOREVER (on the chains: ${targets.map((a) => a.name).join(", ")}):
 What is NOT lost: the tokens, and transfers between chains while the DVNs and the executor work.
 Do this only after a test send has arrived on each of the ${n} directions.`);
   await confirm("", "RENOUNCE FOREVER");
+  // Read again after the confirmation, before the first transaction: a packet can park, or a peer move, meanwhile.
+  const late = new Map();
+  for (const a of targets) {
+    const rems = others(a.name);
+    const [parkedCount, ...peers] = await Promise.all([a.t.parkedCount(), ...rems.map((r) => a.t.peers(NETWORK.chains[r].eid))]);
+    late.set(a.name, { parkedCount, peers: Object.fromEntries(rems.map((r, i) => [r, peers[i]])) });
+  }
+  const changed = lateGate(late, ORDER, Object.fromEntries(ORDER.map((m) => [m, addrs[m]?.address])));
+  if (changed.length) throw new Error(`renounce: changed after the gate (${changed.join("; ")}). Nothing was sent.`);
   for (const a of targets) {
     console.log(`\n${a.name}:`);
     if (a.del !== ethers.ZeroAddress) await waitTx(a.t.setDelegate(ethers.ZeroAddress), "setDelegate(0)");

@@ -58,6 +58,8 @@ Rehearse first with `bash deploy/rehearsal/rehearsal.sh <work-dir>`.
 
 The renounce gate reads every owner-settable slot that can be read without enumeration: the LayerZero config and peer of each direction in `config/network.json`, and `msgInspector` and `preCrime` on each chain. Peers and enforced options for endpoint ids outside `config/network.json` are not enumerable on-chain and are not covered.
 
+Parked packets and peers. A packet parks only after the peer check in `lzReceive`, so it comes from the peer set at that moment. `claimParked` is permissionless and checks the peer again. After the renounce no peer can change, so a packet parked from the current peer stays claimable from its `releaseAt` on. A packet parked from a peer that the owner later changes or removes fails that check. Before the renounce, the owner can only restore the old peer to claim it, or burn it through the delegate (the sender's tokens are then lost). After the renounce, nobody can do either. Operator rule: never change or remove a peer while that chain has parked packets (`status` prints `parked packets: N`); claim them first, after their `releaseAt`. `renounce --execute` reads the parked queues and the peers again after the confirmation and sends nothing if either changed. A packet can still park between that read and the transactions; it comes from the current peer and stays claimable.
+
 ## License
 
 Business Source License 1.1, see [LICENSE](LICENSE). Change Date 2030-06-01, Change License GPL-2.0-or-later.

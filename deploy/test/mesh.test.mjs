@@ -236,3 +236,45 @@ test("a parked packet on any chain refuses the renounce: count 1, count N, count
     assert.deepEqual(only({ preCrime: OTHER, parkedCount: 1n }), [`${n}: preCrime, parkedQueueEmpty`], `${n} both kinds`);
   }
 });
+
+// Queue and peers read again after "RENOUNCE FOREVER" (CodeRabbit on PR 2): literal reads, one chain changed at a time.
+const lateRead = (n, o = {}) => ({
+  parkedCount: 0n,
+  peers: Object.fromEntries(ORDER.filter((r) => r !== n).map((r) => [r, peerHex(ADDR[r])])),
+  ...o,
+});
+const late = (mut = () => ({})) => new Map(ORDER.map((n) => [n, lateRead(n, mut(n))]));
+const lateGateOf = (rs, addrs = ADDR) => (mesh.lateGate ?? (() => ["lateGate missing"]))(rs, ORDER, addrs);
+
+test("after the confirmation, a parked packet, a moved peer or a value not read refuses the renounce (L1, L2, L3)", () => {
+  assert.deepEqual(lateGateOf(late()), [], "unchanged reads pass");
+  assert.deepEqual(lateGateOf(new Map()), [], "no target, nothing to refuse");
+  for (const n of ORDER) {
+    const only = (o) => lateGateOf(late((m) => (m === n ? o(m) : {})));
+    for (const c of [1n, 2n ** 64n, undefined, 0, "0", null]) {
+      assert.deepEqual(only(() => ({ parkedCount: c })), [`${n}: parkedQueueEmpty`], `${n} parkedCount ${String(c)}`);
+    }
+    for (const r of ORDER.filter((x) => x !== n)) {
+      for (const [label, v] of [["moved", peerHex(OTHER)], ["removed", "0x" + "0".repeat(64)], ["not read", undefined]]) {
+        const peers = { ...lateRead(n).peers, [r]: v };
+        assert.deepEqual(only(() => ({ peers })), [`${n}: peer ${r}`], `${n} peer ${r} ${label}`);
+      }
+      const noAddr = { ...ADDR, [r]: undefined };
+      assert.ok(lateGateOf(late(), noAddr).includes(`${n}: peer ${r}`), `${n} peer ${r} without a recorded address`);
+    }
+    assert.deepEqual(only(() => ({ peers: undefined })), [`${n}: ${ORDER.filter((x) => x !== n).map((r) => `peer ${r}`).join(", ")}`], `${n} peers not read`);
+    assert.deepEqual(only(() => ({ parkedCount: 1n, peers: undefined })).length, 1, `${n} both kinds on one line`);
+  }
+});
+
+test("deploy.mjs re-reads the queue and the peers between the confirmation and the first transaction (L4)", () => {
+  const src = fs.readFileSync(new URL("../deploy.mjs", import.meta.url), "utf8");
+  const from = src.indexOf('await confirm("", "RENOUNCE FOREVER")');
+  assert.ok(from > 0, "confirmation not found");
+  const to = src.indexOf("waitTx(", from);
+  assert.ok(to > from, "no transaction after the confirmation");
+  const window = src.slice(from, to);
+  for (const needle of [".parkedCount()", ".peers(", "= lateGate(", "if (changed.length) throw new Error("]) {
+    assert.ok(window.includes(needle), `missing between the confirmation and the first transaction: ${needle}`);
+  }
+});
