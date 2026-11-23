@@ -16,7 +16,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
-import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, evaluateOApp, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
+import { MSG_SEND, MSG_SEND_AND_CALL, eq, b32, directions, expected as expectedMesh, evaluate, evaluateOApp, gateOApp, meshGate, coherence, configAddresses, codeFaults } from "./mesh.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const NETWORK = JSON.parse(fs.readFileSync(path.join(HERE, "..", "config", "network.json"), "utf8"));
@@ -158,8 +158,8 @@ async function readConfig(c, token, remName, remAddress) {
 
 /// Owner-settable OApp state outside the directions (what "wire" resets and what "status" and the gate check): see mesh.mjs.
 async function readOApp(token) {
-  const [msgInspector, preCrime] = await Promise.all([token.msgInspector(), token.preCrime()]);
-  return { msgInspector, preCrime };
+  const [msgInspector, preCrime, parkedCount] = await Promise.all([token.msgInspector(), token.preCrime(), token.parkedCount()]);
+  return { msgInspector, preCrime, parkedCount };
 }
 
 async function waitTx(promise, desc) {
@@ -206,9 +206,11 @@ async function status() {
       console.log(`  ${f.length ? "MISSING " : "OK      "} -> ${remName}${f.length ? ": " + f.join(", ") : ""}`);
       if (f.length) all = false;
     }
-    const fo = Object.entries(evaluateOApp(await readOApp(t))).filter(([, ok]) => !ok).map(([k]) => k);
+    const ro = await readOApp(t);
+    const fo = Object.entries(evaluateOApp(ro)).filter(([, ok]) => !ok).map(([k]) => k);
     console.log(`  ${fo.length ? "MISSING " : "OK      "} OApp state${fo.length ? ": " + fo.join(", ") : " (msgInspector, preCrime)"}`);
     if (fo.length) all = false;
+    console.log(`  parked packets: ${ro.parkedCount}`); // informative: the renounce gate needs 0, the config does not
   }
   console.log(`\nsum of supplies: ${fmt(sum)} BZPX ${sum <= SUPPLY ? "(<= 1e9 OK)" : "(> 1e9 !!!)"}`);
   console.log(all ? `config complete on all ${directions(ORDER).length} directions.` : "config incomplete: run ./bzpx.sh wire");
@@ -434,7 +436,8 @@ async function send(args) {
   console.log(`track: https://layerzeroscan.com/tx/${r.hash}\n       (API: https://scan.layerzero-api.com/v1/messages/tx/${r.hash})`);
 }
 
-/// Renounce gate: reads the N·(N−1) directions (6 chains: 30) and each chain's OApp state (msgInspector, preCrime) and
+/// Renounce gate: reads the N·(N−1) directions (6 chains: 30) and each chain's OApp state (msgInspector, preCrime,
+/// parked queue) and
 /// returns the faults; empty only if all conform, including msgType 1 AND 2 enforcedOptions. A partial renounce would
 /// freeze the mesh forever.
 async function renounceGate(addrs) {
@@ -450,7 +453,7 @@ async function renounceGate(addrs) {
     }
     chains[name] = await chain(name);
     const t = new ethers.Contract(addrs[name].address, ART.abi, chains[name].provider);
-    oapp.set(name, evaluateOApp(await readOApp(t)));
+    oapp.set(name, gateOApp(await readOApp(t)));
     for (const remName of others(name)) {
       if (!addrs[remName]?.address) continue; // the direction stays "not read" in the gate
       const { items, read } = await readConfig(chains[name], t, remName, addrs[remName].address);
@@ -471,7 +474,7 @@ async function renounce(args) {
     for (const f of faults) console.log(`  MISSING ${f}`);
     throw new Error(`renounce gate: ${faults.length} fault(s) on the ${n} directions. After renouncing nothing can be fixed. Run wire first.`);
   }
-  console.log(`renounce gate: the ${n} directions check out (libs, executor, DVNs, confirmations, msgType 1 and 2 gas, peers; msgInspector, preCrime).`);
+  console.log(`renounce gate: the ${n} directions check out (libs, executor, DVNs, confirmations, msgType 1 and 2 gas, peers; msgInspector, preCrime; empty parked queue).`);
   if (!execute) return console.log("read-only: nothing was sent. Renouncing only runs with: renounce --execute");
   const w = readKey();
   const targets = [];
@@ -495,7 +498,9 @@ WHAT IS LOST FOREVER (on the chains: ${targets.map((a) => a.name).join(", ")}):
    can stay stuck forever (tokens already received remain normal on each chain);
  - there is no way to pause, nor to fix a config mistake;
  - with delegate 0 nobody burns a parked packet (burnParked reverts): a credit forged by a compromised DVN
-   can only be claimed after releaseAt, with no possible reaction.
+   can only be claimed after releaseAt, with no possible reaction;
+ - a packet parked from a sender that is no longer the peer is never credited (claimParked re-reads the peer)
+   nor burned: this is why the gate refuses while any chain has a parked packet.
 What is NOT lost: the tokens, and transfers between chains while the DVNs and the executor work.
 Do this only after a test send has arrived on each of the ${n} directions.`);
   await confirm("", "RENOUNCE FOREVER");

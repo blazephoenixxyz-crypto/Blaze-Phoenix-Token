@@ -3,6 +3,8 @@
 //   expected(loc, rem, gas)       config required for the path loc -> rem
 //   evaluate(read, e, peer)       conforming / non-conforming items of ONE direction, from the raw reads
 //   evaluateOApp(read)            owner-settable OApp state outside the directions (msgInspector, preCrime), per chain
+//   queueItems(read)              parked queue empty on one chain (BZPX.parkedCount == 0), per chain
+//   gateOApp(read)                evaluateOApp + queueItems: the per-chain items the renounce gate reads
 //   meshGate(results, order, oapp) renounce gate: list of faults; empty only if all N·(N−1) directions and every
 //                                 chain's OApp state conform
 //   configAddresses(cfg)          every address the config pins on one chain, by role (libs, executor, DVNs)
@@ -99,7 +101,19 @@ export function evaluateOApp(r) {
   };
 }
 
-/// results: Map "loc>rem" -> items (from evaluate); oapp: Map chain -> items (from evaluateOApp).
+/// read = { parkedCount }. A packet parked from a sender that stops being a peer is credited by nobody once the owner
+/// and the delegate are gone (claimParked re-reads the peer, burnParked needs the delegate), so the renounce waits
+/// for an empty queue. Not read (or not a bigint) = fault: an absent count is not zero.
+export function queueItems(r) {
+  return { parkedQueueEmpty: typeof r.parkedCount === "bigint" && r.parkedCount === 0n };
+}
+
+/// Per-chain items of the renounce gate. status keeps evaluateOApp: a parked packet is normal operation, not config.
+export function gateOApp(r) {
+  return { ...evaluateOApp(r), ...queueItems(r) };
+}
+
+/// results: Map "loc>rem" -> items (from evaluate); oapp: Map chain -> items (from gateOApp).
 /// Fault = a direction or a chain without a result, or with a false item.
 export function meshGate(results, order, oapp = new Map()) {
   const faults = [];

@@ -93,6 +93,15 @@ step "wire after renounce refuses" 1 "$TK"$'\nWIRE\n' wire
 step "repeated renounce does nothing" 0 "$TK"$'\nRENOUNCE FOREVER\n' renounce
 step "send base->robinhood 5 after renounce" 0 "$TK"$'\nSEND\n' send base 5
 deliver base
+# F1: the gate reads the parked queue. Two CAP sends seconds apart: the second exceeds the refilled bucket and parks.
+step "send base->robinhood CAP" 0 "$TK"$'\nSEND\n' send base 10000000
+deliver base
+step "send base->robinhood CAP again (parks)" 0 "$TK"$'\nSEND\n' send base 10000000
+deliver base
+step "status shows the parked packet (config still complete)" 0 "" status
+grep -q "parked packets: [1-9]" "$W/step$n.txt" && echo "         parked: status prints the count OK" || echo "         parked: status does NOT print the count"
+step "renounce refuses while a packet is parked" 1 "" renounce
+grep -q "robinhood: parkedQueueEmpty" "$W/step$n.txt" && echo "         parked: the fault names the chain OK" || echo "         parked: the fault does NOT name the chain"
 step "final status" 0 "" status
 
 echo "---- addresses and log"

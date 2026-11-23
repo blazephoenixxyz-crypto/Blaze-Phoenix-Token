@@ -50,8 +50,10 @@ function itemsOf(ls) {
 }
 // per-chain OApp state, literal: network.json declares no msgInspector and no preCrime, so both must read as zero
 const ZERO = "0x0000000000000000000000000000000000000000";
-const oappRead = (o = {}) => ({ msgInspector: ZERO, preCrime: ZERO, ...o });
+const oappRead = (o = {}) => ({ msgInspector: ZERO, preCrime: ZERO, parkedCount: 0n, ...o });
 const oappItems = (mut = () => ({})) => new Map(ORDER.map((n) => [n, (mesh.evaluateOApp ?? (() => ({})))(oappRead(mut(n)))]));
+// per-chain items the renounce gate reads (F1): OApp slots plus the parked queue
+const gateItems = (mut = () => ({})) => new Map(ORDER.map((n) => [n, (mesh.gateOApp ?? (() => ({})))(oappRead(mut(n)))]));
 // gate as deploy.mjs runs it: meshGate over the 30 directions and the per-chain OApp state, plus coherence over config and raw reads
 const gate = (ls, net = NETWORK, oapp = oappItems()) => meshGate(itemsOf(ls), ORDER, oapp).concat(coherence(net, ORDER, ls));
 const one = (L, R, o) => gate(reads((l, r) => (l === L && r === R ? o(l, r) : {})));
@@ -219,4 +221,18 @@ test("an OApp slot no direction covers is refused: msgInspector, preCrime, and a
   }
   // no map at all: every chain is unread, the gate fails closed
   assert.equal(meshGate(itemsOf(reads()), ORDER).length, ORDER.length);
+});
+
+// F1: a parked packet whose sender stops being a peer can never be credited once the owner and delegate are gone.
+// Mutants: J1 queueItems always true, J2 a count of the wrong type passes (typeof dropped), J3 renounceGate reads
+// evaluateOApp instead of gateOApp (rehearsal only).
+test("a parked packet on any chain refuses the renounce: count 1, count N, count never read (F1)", () => {
+  assert.deepEqual(gate(reads(), NETWORK, gateItems()), [], "an empty queue on every chain passes");
+  for (const n of ORDER) {
+    const only = (o) => gate(reads(), NETWORK, gateItems((m) => (m === n ? o : {})));
+    for (const c of [1n, 2n ** 64n, undefined, 0, "0", null]) {
+      assert.deepEqual(only({ parkedCount: c }), [`${n}: parkedQueueEmpty`], `${n} parkedCount ${String(c)}`);
+    }
+    assert.deepEqual(only({ preCrime: OTHER, parkedCount: 1n }), [`${n}: preCrime, parkedQueueEmpty`], `${n} both kinds`);
+  }
 });
