@@ -33,6 +33,7 @@ interface IBZPXPark {
     function claimParked(ParkedPacket calldata p) external;
     function burnParked(ParkedPacket calldata p) external;
     function parked(bytes32 key) external view returns (bool);
+    function parkedCount() external view returns (uint256);
 }
 
 interface IComposeQueue {
@@ -625,3 +626,156 @@ contract BZPXQueueGasTest is BZPXParkBase {
         console2.log("b.lzReceive gas, park path (cold)", g0 - gasleft());
     }
 }
+
+/// @notice parkedCount: the on-chain count of parked packets that the renounce gate reads (deploy/mesh.mjs queueItems).
+///         Oracle = the actions of the test (parks seen in InboundParked logs, claims and burns done here).
+contract BZPXParkedCountTest is BZPXParkBase {
+    function _count() internal view returns (uint256) {
+        return _ip(b).parkedCount();
+    }
+
+    function test_parkedCount_tracksParkClaimBurn() public {
+        uint256 t0 = block.timestamp;
+        uint256 x = 1_000e18;
+        assertEq(_count(), 0, "fresh contract");
+        _deliver(user, CAP, ""); // fast path fills the bucket
+        assertEq(_count(), 0, "fast path counted");
+        _deliverSD(user, uint64(CAP / UNIT) + 1, ""); // above INBOUND_CAP: rejected, no park
+        assertEq(_count(), 0, "rejected packet counted");
+        (uint64 n1, bytes32 g1) = _deliver(user, x, "");
+        assertEq(_count(), 1, "park 1");
+        (uint64 n2, bytes32 g2) = _deliver(user, x, "");
+        (uint64 n3, bytes32 g3) = _deliver(user, x, "");
+        assertEq(_count(), 3, "park 3");
+        IBZPXPark.ParkedPacket memory p1 = _pk(n1, g1, user, x, t0 + 9, ""); // ceil(1 * x * W / CAP) = 9
+        IBZPXPark.ParkedPacket memory p2 = _pk(n2, g2, user, x, t0 + 18, "");
+        IBZPXPark.ParkedPacket memory p3 = _pk(n3, g3, user, x, t0 + 26, "");
+        _claimReverts(p1, abi.encodeWithSelector(NOT_RELEASED, _key(p1), uint64(t0 + 9)));
+        assertEq(_count(), 3, "early claim decremented");
+        vm.warp(t0 + 9);
+        _claim(p1);
+        assertEq(_count(), 2, "claim");
+        _claimReverts(p1, abi.encodeWithSelector(NOT_FOUND, _key(p1)));
+        assertEq(_count(), 2, "second claim decremented");
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(NOT_DELEGATE, attacker));
+        _ip(b).burnParked(p2);
+        assertEq(_count(), 2, "refused burn decremented");
+        vm.prank(owner);
+        _ip(b).burnParked(p3);
+        assertEq(_count(), 1, "burn");
+        vm.warp(t0 + 18);
+        _claim(p2);
+        assertEq(_count(), 0, "drained");
+    }
+
+    function test_parkedCount_composeParkedThenClaimed_decrements() public {
+        address composer = makeAddr("composer");
+        bytes memory payload = bytes("compose payload");
+        bytes memory compose = abi.encodePacked(addressToBytes32(msg.sender), payload);
+        uint256 t0 = block.timestamp;
+        _deliver(user, CAP, "");
+        (uint64 n, bytes32 g) = _deliver(composer, 1_000e18, payload);
+        assertEq(_count(), 1, "compose park");
+        vm.warp(t0 + 9);
+        _claim(_pk(n, g, composer, 1_000e18, t0 + 9, compose));
+        assertEq(_count(), 0, "compose claim");
+    }
+
+    /// Finding 5300: a packet parked from a peer that was then rotated, followed by the full renounce, can never be
+    /// credited (OnlyPeer) nor burned (no delegate) nor rescued (no owner). parkedCount is what makes it visible.
+    function test_parkedCount_peerRotatedThenRenounced_staysNonZero() public {
+        uint256 t0 = block.timestamp;
+        _deliver(user, CAP, "");
+        (uint64 n, bytes32 g) = _deliver(user, 1_000e18, "");
+        IBZPXPark.ParkedPacket memory p = _pk(n, g, user, 1_000e18, t0 + 9, "");
+        vm.startPrank(owner);
+        b.setPeer(A_EID, bytes32(uint256(0xBEEF)));
+        b.setDelegate(address(0));
+        b.renounceOwnership();
+        vm.stopPrank();
+        vm.warp(t0 + WINDOW);
+        _claimReverts(p, abi.encodeWithSelector(ONLY_PEER, A_EID, addressToBytes32(address(a))));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(NOT_DELEGATE, owner));
+        _ip(b).burnParked(p);
+        assertTrue(_ip(b).parked(_key(p)), "packet gone");
+        assertEq(_count(), 1, "stranded packet not counted");
+    }
+
+    /// amountsSD from 1 unit to above INBOUND_CAP (rejected), gaps from 0 to above WINDOW, claims and burns
+    /// interleaved by the bits of ops. After every step parkedCount == keys the test still holds open.
+    function testFuzz_parkedCount_matchesLiveKeys(uint64[8] memory amountsSD, uint32[8] memory gaps, uint8 ops)
+        public
+    {
+        IBZPXPark.ParkedPacket[] memory live = new IBZPXPark.ParkedPacket[](8);
+        bool[] memory open = new bool[](8);
+        uint256 parks;
+        uint256 closed;
+        _deliver(user, CAP, "");
+        vm.recordLogs();
+        for (uint256 i; i < 8; i++) {
+            vm.warp(block.timestamp + bound(gaps[i], 0, WINDOW + 1));
+            _deliverSD(user, uint64(bound(amountsSD[i], 1, CAP / UNIT + 1)), "");
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            for (uint256 k; k < logs.length; k++) {
+                if (logs[k].topics.length < 2 || logs[k].topics[0] != PARKED_TOPIC) continue;
+                live[parks] = abi.decode(logs[k].data, (IBZPXPark.ParkedPacket));
+                open[parks++] = true;
+            }
+            if ((ops >> i) & 1 == 1) {
+                for (uint256 j; j < parks; j++) {
+                    if (!open[j]) continue;
+                    if (live[j].releaseAt <= block.timestamp) _claim(live[j]);
+                    else {
+                        vm.prank(owner);
+                        _ip(b).burnParked(live[j]);
+                    }
+                    open[j] = false;
+                    closed++;
+                    break;
+                }
+            }
+            assertEq(_count(), parks - closed, "parkedCount != live keys");
+            for (uint256 j; j < parks; j++) assertEq(_ip(b).parked(_key(live[j])), open[j], "parked flag != open");
+        }
+    }
+
+    /// Worst case of the park path for the enforced lzReceive gas: cold contract, first park (parkedCount 0 -> 1),
+    /// composeMsg present. Called with exactly LZ_RECEIVE_GAS, outside any try/catch.
+    function test_parkPath_fitsEnforcedGas_cold() public {
+        _deliver(user, CAP, "");
+        bytes memory payload = bytes("compose payload");
+        (bytes memory message, ) = OFTMsgCodec.encode(addressToBytes32(user), uint64(1_000e18 / UNIT), payload);
+        Origin memory o = Origin(A_EID, addressToBytes32(address(a)), ++nonce);
+        address ep = endpoints[B_EID];
+        _cool(address(b));
+        vm.prank(ep);
+        uint256 g0 = gasleft();
+        b.lzReceive{ gas: LZ_RECEIVE_GAS }(o, keccak256("park-gas"), message, address(0), "");
+        uint256 g = g0 - gasleft();
+        emit log_named_uint("gas lzReceive park path (cold, compose, first park)", g);
+        assertEq(_count(), 1, "not parked");
+        assertLt(g, LZ_RECEIVE_GAS, "park path above the enforced gas");
+    }
+}
+
+/// @notice After transferOwnership the former owner can no longer burn a parked packet; the new owner can (5342).
+contract BZPXTransferParkTest is BZPXParkBase {
+    function test_transferOwnership_formerOwnerCannotBurnParked() public {
+        address next = makeAddr("next");
+        uint256 t0 = block.timestamp;
+        _deliver(user, CAP, "");
+        (uint64 n, bytes32 g) = _deliver(user, 1_000e18, "");
+        IBZPXPark.ParkedPacket memory p = _pk(n, g, user, 1_000e18, t0 + 9, "");
+        vm.prank(owner);
+        b.transferOwnership(next);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(NOT_DELEGATE, owner));
+        _ip(b).burnParked(p);
+        vm.prank(next);
+        _ip(b).burnParked(p);
+        assertFalse(_ip(b).parked(_key(p)), "new owner could not burn");
+    }
+}
+

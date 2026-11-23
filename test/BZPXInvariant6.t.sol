@@ -9,6 +9,11 @@ import { SendParam, MessagingFee, OFTReceipt } from "@layerzerolabs/oft-evm/cont
 import { MessagingReceipt } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import { BZPX } from "../src/BZPX.sol";
 
+/// @dev parkedCount read through a local interface so this file also compiles against a contract without it.
+interface IParkedCount {
+    function parkedCount() external view returns (uint256);
+}
+
 interface IPacketHelper {
     function verifyPackets(
         uint32 dstEid,
@@ -213,6 +218,15 @@ contract Handler6 is Test {
         }
     }
 
+    /// parkedCount on each chain == records for that chain not yet claimed or burned (what the renounce gate reads).
+    function checkParkedCount() external view {
+        for (uint256 d; d < N; d++) {
+            uint256 n;
+            for (uint256 i; i < recs.length; i++) if (recs[i].dst == d && recs[i].state == 0) n++;
+            assertEq(IParkedCount(address(tok[d])).parkedCount(), n, "parkedCount != open records");
+        }
+    }
+
     function shadowAvailable(uint256 d, uint32 e) public view returns (uint256) {
         uint256 level = _shadowLevel(d, e);
         return level < CAP ? CAP - level : 0;
@@ -367,6 +381,10 @@ contract BZPXInvariant6Test is TestHelperOz5 {
         h.checkParkedFlags();
     }
 
+    function invariant_parkedCountEqualsLiveKeys() public view {
+        h.checkParkedCount();
+    }
+
     /// Guard against an empty run: real sends and deliveries happened.
     function afterInvariant() external view {
         assertGt(h.sends(), 0, "no send");
@@ -398,5 +416,6 @@ contract BZPXInvariant6Test is TestHelperOz5 {
         h.checkConservation();
         h.checkBuckets();
         h.checkParkedFlags();
+        h.checkParkedCount();
     }
 }

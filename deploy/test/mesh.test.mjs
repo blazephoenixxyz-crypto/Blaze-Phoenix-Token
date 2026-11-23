@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { MSG_SEND, MSG_SEND_AND_CALL, directions, expected, evaluate, meshGate, ulnEqual, coherence } from "../mesh.mjs";
+import * as mesh from "../mesh.mjs"; // producers added after the first release: a missing export fails its test, not the file
 
 const NETWORK = JSON.parse(fs.readFileSync(new URL("../../config/network.json", import.meta.url), "utf8"));
 const ORDER = NETWORK.order;
@@ -47,8 +48,14 @@ function itemsOf(ls) {
   }
   return res;
 }
-// gate as deploy.mjs runs it: meshGate over the 30 directions plus coherence over config and raw reads
-const gate = (ls, net = NETWORK) => meshGate(itemsOf(ls), ORDER).concat(coherence(net, ORDER, ls));
+// per-chain OApp state, literal: network.json declares no msgInspector and no preCrime, so both must read as zero
+const ZERO = "0x0000000000000000000000000000000000000000";
+const oappRead = (o = {}) => ({ msgInspector: ZERO, preCrime: ZERO, parkedCount: 0n, ...o });
+const oappItems = (mut = () => ({})) => new Map(ORDER.map((n) => [n, (mesh.evaluateOApp ?? (() => ({})))(oappRead(mut(n)))]));
+// per-chain items the renounce gate reads (F1): OApp slots plus the parked queue
+const gateItems = (mut = () => ({})) => new Map(ORDER.map((n) => [n, (mesh.gateOApp ?? (() => ({})))(oappRead(mut(n)))]));
+// gate as deploy.mjs runs it: meshGate over the 30 directions and the per-chain OApp state, plus coherence over config and raw reads
+const gate = (ls, net = NETWORK, oapp = oappItems()) => meshGate(itemsOf(ls), ORDER, oapp).concat(coherence(net, ORDER, ls));
 const one = (L, R, o) => gate(reads((l, r) => (l === L && r === R ? o(l, r) : {})));
 
 test("six chains give 30 directions", () => {
@@ -151,10 +158,123 @@ test("enforced gas one below, one above, and msgType 1 missing are refused (G6)"
 test("a direction never read (chain without deploy) is refused", () => {
   const r = itemsOf(reads());
   r.delete(`${ORDER[3]}>${ORDER[2]}`);
-  assert.deepEqual(meshGate(r, ORDER), [`${ORDER[3]} -> ${ORDER[2]}: not read`]);
+  assert.deepEqual(meshGate(r, ORDER, oappItems()), [`${ORDER[3]} -> ${ORDER[2]}: not read`]);
 });
 
 test("wrong peer is refused", () => {
   const [L, R] = [ORDER[1], ORDER[2]];
   assert.deepEqual(one(L, R, () => ({ peer: peerHex(ADDR[ORDER[3]]) })), [`${L} -> ${R}: peer`]);
+});
+
+// F4: every address the config pins must have code on its chain. The roles below are written LITERALLY from network.json
+// (not from configAddresses), so a role dropped from the producer turns its vector red. Mutants: M1 drop a role,
+// M2 accept a never-probed address (`!== "0x"`).
+const rolesOf = (n) => [
+  ["sendLib", C[n].sendLib],
+  ["receiveLib", C[n].receiveLib],
+  ["executor", C[n].executor],
+  ...C[n].dvns.map((a, i) => [`dvn ${C[n].dvnNames[i]}`, a]),
+];
+const CODE = "0x6080";
+
+test("a pinned config address without code is refused by role, on every chain (F4)", () => {
+  for (const n of ORDER) {
+    const roles = rolesOf(n);
+    const all = Object.fromEntries(roles.map(([, a]) => [a.toLowerCase(), CODE]));
+    assert.deepEqual(mesh.codeFaults(n, C[n], all), [], `${n}: every address with code passes`);
+    for (const [role, a] of roles) {
+      const want = [`${n}: ${role} ${a} has no code`];
+      assert.deepEqual(mesh.codeFaults(n, C[n], { ...all, [a.toLowerCase()]: "0x" }), want, `${n} ${role}: empty code`);
+      const unprobed = { ...all };
+      delete unprobed[a.toLowerCase()];
+      assert.deepEqual(mesh.codeFaults(n, C[n], unprobed), want, `${n} ${role}: never probed`);
+      assert.deepEqual(mesh.codeFaults(n, C[n], { ...all, [a.toLowerCase()]: null }), want, `${n} ${role}: null read`);
+    }
+    // every address at once: one fault per role, in role order
+    assert.deepEqual(mesh.codeFaults(n, C[n], {}), roles.map(([role, a]) => `${n}: ${role} ${a} has no code`));
+  }
+});
+
+test("the probed addresses cover every address that wire writes and the gate compares (F4 parity)", () => {
+  for (const [L, R] of directions(ORDER)) {
+    const probed = new Set(mesh.configAddresses(C[L]).map(([, a]) => a.toLowerCase()));
+    const e = expected(C[L], C[R], NETWORK.lzReceiveGas);
+    for (const a of [C[L].sendLib, C[L].receiveLib, e.exec[1], ...e.sendUln[4], ...e.recvUln[4], ...e.sendUln[5], ...e.recvUln[5]])
+      assert.ok(probed.has(a.toLowerCase()), `${L}>${R}: ${a} is not probed`);
+  }
+  for (const n of ORDER) assert.deepEqual(mesh.configAddresses(C[n]), rolesOf(n), n);
+});
+
+// F2: owner-settable OApp slots outside the directions. Mutants: M1 evaluateOApp without msgInspector, M2 without
+// preCrime, M3 meshGate skips a chain whose state was not read, M4 renounceGate does not pass the map (rehearsal).
+test("an OApp slot no direction covers is refused: msgInspector, preCrime, and a chain never read (F2)", () => {
+  assert.deepEqual(gate(reads(), NETWORK, oappItems()), [], "both zero on every chain passes");
+  for (const n of ORDER) {
+    const only = (o) => gate(reads(), NETWORK, oappItems((m) => (m === n ? o : {})));
+    assert.deepEqual(only({ msgInspector: OTHER }), [`${n}: msgInspector`], `${n} inspector`);
+    assert.deepEqual(only({ preCrime: OTHER }), [`${n}: preCrime`], `${n} preCrime`);
+    assert.deepEqual(only({ msgInspector: OTHER, preCrime: OTHER }), [`${n}: msgInspector, preCrime`], `${n} both`);
+    assert.deepEqual(only({ msgInspector: undefined }), [`${n}: msgInspector`], `${n} field missing`);
+    const missing = oappItems();
+    missing.delete(n);
+    assert.deepEqual(gate(reads(), NETWORK, missing), [`${n}: OApp state not read`], `${n} never read`);
+  }
+  // no map at all: every chain is unread, the gate fails closed
+  assert.equal(meshGate(itemsOf(reads()), ORDER).length, ORDER.length);
+});
+
+// F1: a parked packet whose sender stops being a peer can never be credited once the owner and delegate are gone.
+// Mutants: J1 queueItems always true, J2 a count of the wrong type passes (typeof dropped), J3 renounceGate reads
+// evaluateOApp instead of gateOApp (rehearsal only).
+test("a parked packet on any chain refuses the renounce: count 1, count N, count never read (F1)", () => {
+  assert.deepEqual(gate(reads(), NETWORK, gateItems()), [], "an empty queue on every chain passes");
+  for (const n of ORDER) {
+    const only = (o) => gate(reads(), NETWORK, gateItems((m) => (m === n ? o : {})));
+    for (const c of [1n, 2n ** 64n, undefined, 0, "0", null]) {
+      assert.deepEqual(only({ parkedCount: c }), [`${n}: parkedQueueEmpty`], `${n} parkedCount ${String(c)}`);
+    }
+    assert.deepEqual(only({ preCrime: OTHER, parkedCount: 1n }), [`${n}: preCrime, parkedQueueEmpty`], `${n} both kinds`);
+  }
+});
+
+// Queue and peers read again after "RENOUNCE FOREVER" (CodeRabbit on PR 2): literal reads, one chain changed at a time.
+const lateRead = (n, o = {}) => ({
+  parkedCount: 0n,
+  peers: Object.fromEntries(ORDER.filter((r) => r !== n).map((r) => [r, peerHex(ADDR[r])])),
+  ...o,
+});
+const late = (mut = () => ({})) => new Map(ORDER.map((n) => [n, lateRead(n, mut(n))]));
+const lateGateOf = (rs, addrs = ADDR) => (mesh.lateGate ?? (() => ["lateGate missing"]))(rs, ORDER, addrs);
+
+test("after the confirmation, a parked packet, a moved peer or a value not read refuses the renounce (L1, L2, L3)", () => {
+  assert.deepEqual(lateGateOf(late()), [], "unchanged reads pass");
+  assert.deepEqual(lateGateOf(new Map()), [], "no target, nothing to refuse");
+  for (const n of ORDER) {
+    const only = (o) => lateGateOf(late((m) => (m === n ? o(m) : {})));
+    for (const c of [1n, 2n ** 64n, undefined, 0, "0", null]) {
+      assert.deepEqual(only(() => ({ parkedCount: c })), [`${n}: parkedQueueEmpty`], `${n} parkedCount ${String(c)}`);
+    }
+    for (const r of ORDER.filter((x) => x !== n)) {
+      for (const [label, v] of [["moved", peerHex(OTHER)], ["removed", "0x" + "0".repeat(64)], ["not read", undefined]]) {
+        const peers = { ...lateRead(n).peers, [r]: v };
+        assert.deepEqual(only(() => ({ peers })), [`${n}: peer ${r}`], `${n} peer ${r} ${label}`);
+      }
+      const noAddr = { ...ADDR, [r]: undefined };
+      assert.ok(lateGateOf(late(), noAddr).includes(`${n}: peer ${r}`), `${n} peer ${r} without a recorded address`);
+    }
+    assert.deepEqual(only(() => ({ peers: undefined })), [`${n}: ${ORDER.filter((x) => x !== n).map((r) => `peer ${r}`).join(", ")}`], `${n} peers not read`);
+    assert.deepEqual(only(() => ({ parkedCount: 1n, peers: undefined })).length, 1, `${n} both kinds on one line`);
+  }
+});
+
+test("deploy.mjs re-reads the queue and the peers between the confirmation and the first transaction (L4)", () => {
+  const src = fs.readFileSync(new URL("../deploy.mjs", import.meta.url), "utf8");
+  const from = src.indexOf('await confirm("", "RENOUNCE FOREVER")');
+  assert.ok(from > 0, "confirmation not found");
+  const to = src.indexOf("waitTx(", from);
+  assert.ok(to > from, "no transaction after the confirmation");
+  const window = src.slice(from, to);
+  for (const needle of [".parkedCount()", ".peers(", "= lateGate(", "if (changed.length) throw new Error("]) {
+    assert.ok(window.includes(needle), `missing between the confirmation and the first transaction: ${needle}`);
+  }
 });

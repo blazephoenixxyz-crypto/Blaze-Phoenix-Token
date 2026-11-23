@@ -7,7 +7,7 @@ The contract in `src/BZPX.sol` is the standard `OFT` from `@layerzerolabs/oft-ev
 1. **Fixed supply.** `TOTAL_SUPPLY` (1,000,000,000 BZPX, 18 decimals) is minted once, in the constructor, and only on `MAIN_CHAIN_ID` (Base, 8453). On every other chain the supply starts at zero and grows only with packets from peers, which burn the same amount on the source chain.
 2. **Inbound cap.** The amount credited from one source endpoint id is limited to `INBOUND_CAP` (10,000,000 BZPX) per `INBOUND_WINDOW` (1 day); capacity refills linearly. A delivery above the available capacity never reverts: the packet is parked with a release time (FIFO per source eid) and anyone can claim it once released. The endpoint delegate can burn a parked packet, which refunds its capacity. A send above `INBOUND_CAP` reverts on the source chain.
 
-The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`.
+The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`. `transferOwnership` moves the delegate to the new owner.
 
 ## Layout
 
@@ -55,6 +55,10 @@ forge verify-contract <address> src/BZPX.sol:BZPX --show-standard-json-input > d
 ```
 
 Rehearse first with `bash deploy/rehearsal/rehearsal.sh <work-dir>`.
+
+The renounce gate reads every owner-settable slot that can be read without enumeration: the LayerZero config and peer of each direction in `config/network.json`, and `msgInspector` and `preCrime` on each chain. Peers and enforced options for endpoint ids outside `config/network.json` are not enumerable on-chain and are not covered.
+
+Parked packets and peers. A packet parks only after the peer check in `lzReceive`, so it comes from the peer set at that moment. `claimParked` is permissionless and checks the peer again. After the renounce no peer can change, so a packet parked from the current peer stays claimable from its `releaseAt` on. A packet parked from a peer that the owner later changes or removes fails that check. Before the renounce, the owner can only restore the old peer to claim it, or burn it through the delegate (the sender's tokens are then lost). After the renounce, nobody can do either. Operator rule: never change or remove a peer while that chain has parked packets (`status` prints `parked packets: N`); claim them first, after their `releaseAt`. `renounce --execute` reads the parked queues and the peers again after the confirmation and sends nothing if either changed. A packet can still park between that read and the transactions; it comes from the current peer and stays claimable.
 
 ## License
 

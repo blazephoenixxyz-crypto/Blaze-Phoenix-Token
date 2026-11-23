@@ -313,4 +313,50 @@ contract BZPXTest is BZPXBase {
         assertLt(g, LZ_RECEIVE_GAS / 2, "headroom >= 2x");
         assertEq(b.balanceOf(makeAddr("fresh")), 1e18);
     }
+
+    // 10. transferOwnership moves the endpoint delegate to the new owner (finding 5342). Oracle: endpoint.delegates().
+    function _delegateOf(BZPX t, uint32 eid) internal view returns (address) {
+        return IEndpointDelegates(endpoints[eid]).delegates(address(t));
+    }
+
+    function test_transferOwnership_movesDelegate() public {
+        address next = makeAddr("next");
+        vm.prank(owner);
+        a.transferOwnership(next);
+        assertEq(a.owner(), next);
+        assertEq(_delegateOf(a, A_EID), next, "delegate stayed with the former owner");
+        ILayerZeroEndpointV2 ep = ILayerZeroEndpointV2(endpoints[A_EID]);
+        address lib = ep.defaultSendLibrary(B_EID);
+        vm.prank(owner);
+        vm.expectRevert(Errors.LZ_Unauthorized.selector);
+        ep.setSendLibrary(address(a), B_EID, lib);
+        vm.prank(next);
+        ep.setSendLibrary(address(a), B_EID, lib);
+        assertEq(ep.getSendLibrary(address(a), B_EID), lib);
+    }
+
+    /// Two transfers in a row, after the owner had handed the delegate to a third key: the delegate ends with the owner.
+    function testFuzz_transferOwnership_movesDelegate(address next, address third) public {
+        vm.assume(next != address(0) && third != address(0) && next != owner);
+        vm.startPrank(owner);
+        b.setDelegate(third);
+        b.transferOwnership(next);
+        vm.stopPrank();
+        assertEq(_delegateOf(b, B_EID), next, "first transfer");
+        vm.prank(next);
+        b.transferOwnership(owner);
+        assertEq(_delegateOf(b, B_EID), owner, "second transfer");
+        assertEq(b.owner(), owner);
+    }
+
+    function test_transferOwnership_zeroOrNotOwner_reverts_delegateUnchanged() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        a.transferOwnership(address(0));
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        a.transferOwnership(attacker);
+        assertEq(a.owner(), owner);
+        assertEq(_delegateOf(a, A_EID), owner, "delegate moved on a refused transfer");
+    }
 }

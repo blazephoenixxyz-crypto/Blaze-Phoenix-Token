@@ -2,7 +2,14 @@
 //   directions(order)             all ordered pairs (loc, rem), loc != rem: N·(N−1) directions (6 chains: 30)
 //   expected(loc, rem, gas)       config required for the path loc -> rem
 //   evaluate(read, e, peer)       conforming / non-conforming items of ONE direction, from the raw reads
-//   meshGate(results, order)      renounce gate: list of faults; empty only if all N·(N−1) directions conform
+//   evaluateOApp(read)            owner-settable OApp state outside the directions (msgInspector, preCrime), per chain
+//   queueItems(read)              parked queue empty on one chain (BZPX.parkedCount == 0), per chain
+//   gateOApp(read)                evaluateOApp + queueItems: the per-chain items the renounce gate reads
+//   meshGate(results, order, oapp) renounce gate: list of faults; empty only if all N·(N−1) directions and every
+//                                 chain's OApp state conform
+//   lateGate(reads, order, addrs) parked queue and peers read again after the renounce confirmation: list of faults
+//   configAddresses(cfg)          every address the config pins on one chain, by role (libs, executor, DVNs)
+//   codeFaults(name, cfg, codes)  one fault per pinned address without code (or never probed) on that chain
 import { ethers } from "ethers";
 
 export const MSG_SEND = 1; // OFTMsgCodec SEND
@@ -86,8 +93,30 @@ export function coherence(network, order, reads = new Map()) {
   return faults;
 }
 
-/// results: Map "loc>rem" -> items (from evaluate). Fault = a direction without a result or with a false item.
-export function meshGate(results, order) {
+/// read = { msgInspector, preCrime }. network.json declares neither, so the required value of both is zero; a field
+/// missing from the read is a fault.
+export function evaluateOApp(r) {
+  return {
+    msgInspector: eq(r.msgInspector, ethers.ZeroAddress),
+    preCrime: eq(r.preCrime, ethers.ZeroAddress),
+  };
+}
+
+/// read = { parkedCount }. A packet parked from a sender that stops being a peer is credited by nobody once the owner
+/// and the delegate are gone (claimParked re-reads the peer, burnParked needs the delegate), so the renounce waits
+/// for an empty queue. Not read (or not a bigint) = fault: an absent count is not zero.
+export function queueItems(r) {
+  return { parkedQueueEmpty: typeof r.parkedCount === "bigint" && r.parkedCount === 0n };
+}
+
+/// Per-chain items of the renounce gate. status keeps evaluateOApp: a parked packet is normal operation, not config.
+export function gateOApp(r) {
+  return { ...evaluateOApp(r), ...queueItems(r) };
+}
+
+/// results: Map "loc>rem" -> items (from evaluate); oapp: Map chain -> items (from gateOApp).
+/// Fault = a direction or a chain without a result, or with a false item.
+export function meshGate(results, order, oapp = new Map()) {
   const faults = [];
   for (const [loc, rem] of directions(order)) {
     const items = results.get(`${loc}>${rem}`);
@@ -98,5 +127,51 @@ export function meshGate(results, order) {
     const f = Object.entries(items).filter(([, v]) => v !== true).map(([k]) => k);
     if (f.length) faults.push(`${loc} -> ${rem}: ${f.join(", ")}`);
   }
+  for (const name of order) {
+    const items = oapp.get(name);
+    if (!items) {
+      faults.push(`${name}: OApp state not read`);
+      continue;
+    }
+    const f = Object.entries(items).filter(([, v]) => v !== true).map(([k]) => k);
+    if (f.length) faults.push(`${name}: ${f.join(", ")}`);
+  }
   return faults;
+}
+
+/// reads: Map chain -> { parkedCount, peers: { remote: bytes32 } }, read again after the operator's confirmation and
+/// before the first renounce transaction; addrs: { chain: address }. A packet can park, or the owner can move a peer,
+/// while the operator reads the warning. Fault = a parked packet, a peer that is not the recorded remote, or a value
+/// not read. This narrows the window to the transactions themselves; it does not close it (README, renounce).
+export function lateGate(reads, order, addrs) {
+  const faults = [];
+  for (const [name, r] of reads) {
+    const f = queueItems(r).parkedQueueEmpty ? [] : ["parkedQueueEmpty"];
+    for (const rem of order) {
+      if (rem !== name && !(addrs[rem] && eq(r.peers?.[rem], b32(addrs[rem])))) f.push(`peer ${rem}`);
+    }
+    if (f.length) faults.push(`${name}: ${f.join(", ")}`);
+  }
+  return faults;
+}
+
+/// Every address network.json pins on one chain, by role: what wire writes and the gate compares (expected/evaluate).
+/// The gate compares the on-chain config with these same values, so it cannot tell whether they exist: codeFaults does.
+export function configAddresses(cfg) {
+  return [
+    ["sendLib", cfg.sendLib],
+    ["receiveLib", cfg.receiveLib],
+    ["executor", cfg.executor],
+    ...cfg.dvns.map((a, i) => [`dvn ${cfg.dvnNames[i]}`, a]),
+  ];
+}
+
+/// codes: lower-case address -> eth_getCode result. An address never probed counts as without code (absent is not empty).
+export function codeFaults(name, cfg, codes) {
+  return configAddresses(cfg)
+    .filter(([, a]) => {
+      const code = codes[a.toLowerCase()];
+      return !(typeof code === "string" && code.length > 2);
+    })
+    .map(([role, a]) => `${name}: ${role} ${a} has no code`);
 }

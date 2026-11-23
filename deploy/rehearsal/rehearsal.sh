@@ -67,12 +67,25 @@ step "wire cancelled" 0 "$TK"$'\nno\n' wire
 step "status still incomplete" 3 "" status
 step "wire on both chains" 0 "$TK"$'\nWIRE\n' wire
 step "status complete" 0 "" status
+# a pinned DVN without code fails every command closed, by role (the gate alone compares the config with itself)
+DVN=$(node -e "console.log(require('$NETWORK').chains.base.dvns[0])")
+DVN_CODE=$(cast code "$DVN" --rpc-url "$RPC_BASE")
+cast rpc anvil_setCode "$DVN" 0x --rpc-url "$RPC_BASE" > /dev/null
+step "status refuses a pinned DVN without code" 1 "" status
+grep -q "dvn .* $DVN has no code" "$W/step$n.txt" && echo "         no code: the fault names the DVN OK" || echo "         no code: the fault names the DVN FAILED"
+cast rpc anvil_setCode "$DVN" "$DVN_CODE" --rpc-url "$RPC_BASE" > /dev/null
+step "status complete again once the DVN has code" 0 "" status
 step "repeated wire does nothing" 0 "$TK"$'\nWIRE\n' wire
 step "send base->robinhood 1000" 0 "$TK"$'\nSEND\n' send base 1000
 deliver base
 step "send robinhood->base 400" 0 "$TK"$'\nSEND\n' send robinhood 400
 deliver robinhood
 step "status after round trip" 0 "" status
+# an owner-set msgInspector would be frozen by the renounce: the gate refuses it and wire resets it
+AB0=$(node -e "console.log(require('$BZPX_ADDRESSES').base.address)")
+cast send "$AB0" 'setMsgInspector(address)' 0x00000000000000000000000000000000000000ff --private-key "$TK" --rpc-url "$RPC_BASE" > /dev/null
+step "renounce refuses while a msgInspector is set" 1 "" renounce
+step "wire resets the msgInspector" 0 "$TK"$'\nWIRE\n' wire
 step "renounce cancelled" 0 "$TK"$'\nrenounce\n' renounce
 step "renounce" 0 "$TK"$'\nRENOUNCE FOREVER\n' renounce
 step "status after renounce" 0 "" status
@@ -80,6 +93,15 @@ step "wire after renounce refuses" 1 "$TK"$'\nWIRE\n' wire
 step "repeated renounce does nothing" 0 "$TK"$'\nRENOUNCE FOREVER\n' renounce
 step "send base->robinhood 5 after renounce" 0 "$TK"$'\nSEND\n' send base 5
 deliver base
+# F1: the gate reads the parked queue. Two CAP sends seconds apart: the second exceeds the refilled bucket and parks.
+step "send base->robinhood CAP" 0 "$TK"$'\nSEND\n' send base 10000000
+deliver base
+step "send base->robinhood CAP again (parks)" 0 "$TK"$'\nSEND\n' send base 10000000
+deliver base
+step "status shows the parked packet (config still complete)" 0 "" status
+grep -q "parked packets: [1-9]" "$W/step$n.txt" && echo "         parked: status prints the count OK" || echo "         parked: status does NOT print the count"
+step "renounce refuses while a packet is parked" 1 "" renounce
+grep -q "robinhood: parkedQueueEmpty" "$W/step$n.txt" && echo "         parked: the fault names the chain OK" || echo "         parked: the fault does NOT name the chain"
 step "final status" 0 "" status
 
 echo "---- addresses and log"

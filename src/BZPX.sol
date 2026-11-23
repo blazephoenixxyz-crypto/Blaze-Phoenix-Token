@@ -25,6 +25,7 @@ interface IEndpointV2Delegates {
 ///            INBOUND_CAP is rejected without credit or debt: a send above INBOUND_CAP reverts on the source chain.
 /// @dev owner_ is both the Ownable owner and the endpoint delegate. A full renounce needs
 ///      setDelegate(address(0)) and then renounceOwnership(): the delegate survives renounceOwnership().
+///      transferOwnership moves the delegate to the new owner.
 contract BZPX is OFT {
     uint256 public constant MAIN_CHAIN_ID = 8453;
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
@@ -52,6 +53,7 @@ contract BZPX is OFT {
 
     mapping(uint32 srcEid => Inbound) public inbound;
     mapping(bytes32 key => bool) public parked;
+    uint256 public parkedCount; // parked packets not yet claimed or burned, all source eids
 
     event InboundParked(bytes32 indexed key, ParkedPacket packet);
     event InboundRejected(bytes32 indexed guid, uint32 srcEid, address to, uint256 amountLD);
@@ -82,6 +84,7 @@ contract BZPX is OFT {
         if (block.timestamp < p_.releaseAt) revert ParkedNotReleased(key, p_.releaseAt);
         if (_getPeerOrRevert(p_.srcEid) != p_.sender) revert OnlyPeer(p_.srcEid, p_.sender);
         delete parked[key];
+        parkedCount--;
         uint256 amountReceivedLD = _credit(p_.to, p_.amountLD, p_.srcEid);
         if (p_.composeMsg.length != 0) {
             endpoint.sendCompose(
@@ -101,9 +104,17 @@ contract BZPX is OFT {
         bytes32 key = keccak256(abi.encode(p_));
         if (!parked[key]) revert ParkedNotFound(key);
         delete parked[key];
+        parkedCount--;
         uint256 level = _level(p_.srcEid);
         inbound[p_.srcEid] = Inbound(uint192(level > p_.amountLD ? level - p_.amountLD : 0), uint64(block.timestamp));
         emit ParkedBurned(key);
+    }
+
+    /// @dev The endpoint delegate follows the owner on transfer, so a former owner keeps no power on the endpoint
+    ///      or over parked packets. renounceOwnership() is unchanged: see the contract @dev above.
+    function transferOwnership(address newOwner_) public override onlyOwner {
+        super.transferOwnership(newOwner_);
+        endpoint.setDelegate(newOwner_);
     }
 
     function _debitView(
@@ -144,6 +155,7 @@ contract BZPX is OFT {
         );
         bytes32 key = keccak256(abi.encode(p));
         parked[key] = true;
+        parkedCount++;
         emit InboundParked(key, p);
     }
 
