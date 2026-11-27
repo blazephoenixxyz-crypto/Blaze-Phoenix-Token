@@ -8,22 +8,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          submodules: recursive
 
       - uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Install dependencies
-        run: |
-          npm ci
-          npm ci --prefix deploy
+      - name: Unit, fuzz, invariant and fork tests
+        env:
+          BASE_RPC_URL: https://mainnet.base.org
+        run: forge test -vv
 
-      - name: Foundry tests (no fork)
-        run: forge test --no-match-contract Fork
-
-      - name: Deploy script tests
-        run: node --test deploy/test/*.test.mjs
+      - name: Mutants
+        run: python3 scripts/mutants.py

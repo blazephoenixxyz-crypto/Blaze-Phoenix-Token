@@ -1,69 +1,56 @@
 # BZPX Token
 
-BZPX is the Blaze Phoenix token, built as a [LayerZero V2](https://docs.layerzero.network/) Omnichain Fungible Token (OFT). Tokens are burned on the source chain and minted on the destination chain, so the total supply across chains stays constant.
+BZPX is the Blaze Phoenix token: a plain ERC-20 on Base.
 
-The contract in `src/BZPX.sol` is the standard `OFT` from `@layerzerolabs/oft-evm` 4.0.1 on OpenZeppelin Contracts 5.6.1, with two additions of its own:
-
-1. **Fixed supply.** `TOTAL_SUPPLY` (1,000,000,000 BZPX, 18 decimals) is minted once, in the constructor, and only on `MAIN_CHAIN_ID` (Base, 8453). On every other chain the supply starts at zero and grows only with packets from peers, which burn the same amount on the source chain.
-2. **Inbound cap.** The amount credited from one source endpoint id is limited to `INBOUND_CAP` (10,000,000 BZPX) per `INBOUND_WINDOW` (1 day); capacity refills linearly. A delivery above the available capacity never reverts: the packet is parked with a release time (FIFO per source eid) and anyone can claim it once released. The endpoint delegate can burn a parked packet, which refunds its capacity. A send above `INBOUND_CAP` reverts on the source chain.
-
-The owner is both the `Ownable` owner and the LayerZero endpoint delegate. A full renounce needs `setDelegate(address(0))` first and then `renounceOwnership()`, because the delegate survives `renounceOwnership()`. `transferOwnership` moves the delegate to the new owner.
-
-## Layout
-
-| Path | Content |
+| | |
 |---|---|
-| `src/BZPX.sol` | the token |
-| `test/` | Foundry tests: unit, fuzz, invariant, gas, and fork tests against the real endpoints |
-| `config/network.json` | chains, endpoint ids, libraries, executors, DVNs, confirmations, receive gas |
-| `deploy/` | Node scripts for deployment, wiring, status checks and the renounce gate (`bzpx.sh`, `deploy.mjs`, `mesh.mjs`) |
-| `deploy/rehearsal/` | local rehearsal against two anvil forks; nothing reaches a live chain |
-| `deploy/BZPX.artifact.json` | compiled artifact the deploy script uses (regenerate with `node deploy/generate-artifact.mjs` after `forge build`) |
-| `deploy/verification/` | standard-JSON input for block-explorer verification |
+| Chain | Base (8453) |
+| Address | [`0x053D75c00FdD571538492e3B1686Bd963a0911A7`](https://basescan.org/token/0x053D75c00FdD571538492e3B1686Bd963a0911A7) |
+| Supply | 1,000,000,000 BZPX, 18 decimals, minted once in the constructor |
+| Source | [`src/BlazePhoenix.sol`](src/BlazePhoenix.sol), exact match on [Sourcify](https://repo.sourcify.dev/8453/0x053D75c00FdD571538492e3B1686Bd963a0911A7) |
+
+## What the contract guarantees
+
+- **Fixed supply.** The whole supply is minted once, to one recipient, in the constructor. There is no mint function, so the supply can only go down, through `burn` by a holder of their own tokens.
+- **No owner.** No `Ownable`, no admin role, no pause, no blacklist, no upgrade proxy, no fee on transfer. Nobody can change balances, allowances or code after deployment.
+- **Standard behaviour.** ERC-20 with the OpenZeppelin 5 custom errors, `increaseAllowance` / `decreaseAllowance`, and an infinite allowance (`type(uint256).max`) that is never spent.
+- **No ETH.** The contract has no `receive` or `fallback`; sending ETH to it reverts.
+
+The contract is about 120 lines and imports nothing.
+
+## The deployed bytecode is this source
+
+`test/Deployed.fork.t.sol` forks Base, compiles `src/BlazePhoenix.sol` with the deployment settings (solc 0.8.28, optimizer 200 runs, EVM `cancun`) and checks that the runtime bytecode at the token address is the same, byte for byte, apart from the trailing metadata hash, which depends on the file path.
 
 ## Build and test
 
-Requires [Foundry](https://book.getfoundry.sh/) and Node.js 20 or newer.
+Requires [Foundry](https://book.getfoundry.sh/).
 
 ```sh
-npm ci
-forge build
-forge test --no-match-contract Fork      # unit, fuzz, invariant and gas suites; no network needed
-npm ci --prefix deploy
-node --test deploy/test/*.test.mjs       # configuration checks for the deploy scripts
+git clone --recursive https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Token
+cd Blaze-Phoenix-Token
+forge test                                          # unit, fuzz and invariant tests
+BASE_RPC_URL=https://mainnet.base.org forge test    # adds the fork test against the live token
+python3 scripts/mutants.py                          # every mutant must make the suite fail
 ```
 
-The fork suite (`test/BZPXFork.t.sol`) runs against the real endpoints. It reads the RPC URLs from `config/network.json`; override them with `RPC_BASE` and `RPC_ROBINHOOD`, and pin blocks with `BLOCK_BASE` and `BLOCK_RH`. It sends nothing and uses no keys.
+| Suite | What it covers |
+|---|---|
+| `test/BlazePhoenix.t.sol` | metadata, mint, every revert with its exact error arguments, events, transfer, approve, transferFrom, allowance changes, burn, the missing admin surface; fuzz on transfers, allowances and burns |
+| `test/BlazePhoenix.invariant.t.sol` | random call sequences: balances always add up to the supply, and the supply equals the mint minus the burns |
+| `test/Deployed.fork.t.sol` | the live token on Base matches this source |
+| `scripts/mutants.py` | 25 hand-written mutants of the source; each one must be killed by the suite |
 
-To regenerate the verification input:
+CI runs all of them on every push and pull request.
 
-```sh
-forge verify-contract <address> src/BZPX.sol:BZPX --show-standard-json-input > deploy/verification/BZPX.standard-input.json
-```
+## Earlier design
 
-## Deploying
-
-`deploy/bzpx.sh` reads the private key from a hidden prompt (never from a file or the shell history) and passes it to `deploy/deploy.mjs` as an environment variable only for the duration of the command.
-
-```sh
-./deploy/bzpx.sh status                 # read-only
-./deploy/bzpx.sh deploy
-./deploy/bzpx.sh wire                   # explicit LayerZero config on every direction, plus peers
-./deploy/bzpx.sh send base 1 robinhood  # test send
-./deploy/bzpx.sh renounce               # read-only gate
-./deploy/bzpx.sh renounce --execute     # irreversible
-```
-
-Rehearse first with `bash deploy/rehearsal/rehearsal.sh <work-dir>`.
-
-The renounce gate reads every owner-settable slot that can be read without enumeration: the LayerZero config and peer of each direction in `config/network.json`, and `msgInspector` and `preCrime` on each chain. Peers and enforced options for endpoint ids outside `config/network.json` are not enumerable on-chain and are not covered.
-
-Parked packets and peers. A packet parks only after the peer check in `lzReceive`, so it comes from the peer set at that moment. `claimParked` is permissionless and checks the peer again. After the renounce no peer can change, so a packet parked from the current peer stays claimable from its `releaseAt` on. A packet parked from a peer that the owner later changes or removes fails that check. Before the renounce, the owner can only restore the old peer to claim it, or burn it through the delegate (the sender's tokens are then lost). After the renounce, nobody can do either. Operator rule: never change or remove a peer while that chain has parked packets (`status` prints `parked packets: N`); claim them first, after their `releaseAt`. `renounce --execute` reads the parked queues and the peers again after the confirmation and sends nothing if either changed. A packet can still park between that read and the transactions; it comes from the current peer and stays claimable.
-
-## License
-
-Business Source License 1.1, see [LICENSE](LICENSE). Change Date 2030-06-01, Change License GPL-2.0-or-later.
+An omnichain (LayerZero OFT) version of BZPX was developed in this repository and never deployed. BZPX is a Base token only. That code is kept at the tag [`oft-archive`](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Token/tree/oft-archive).
 
 ## Security
 
 See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT, as in the verified source.

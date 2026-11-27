@@ -1,9 +1,0 @@
-{
-  "name": "bzpx-deploy",
-  "private": true,
-  "type": "module",
-  "description": "Deployment and configuration of BZPX (LayerZero V2 OFT) on Base and Robinhood Chain. The key is read only through a hidden prompt (bzpx.sh).",
-  "dependencies": {
-    "ethers": "6.17.0"
-  }
-}

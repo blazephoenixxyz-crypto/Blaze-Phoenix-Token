@@ -3,27 +3,21 @@ src = "src"
 test = "test"
 script = "script"
 out = "out"
-cache_path = "cache"
-libs = ["node_modules"]
+libs = ["lib"]
+# Same settings as the deployed bytecode and its Basescan verification.
 solc_version = "0.8.28"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
-ffi = false
-fs_permissions = [{ access = "read", path = "./config" }]
-remappings = [
-  "@layerzerolabs/=node_modules/@layerzerolabs/",
-  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
-  "forge-std/=node_modules/@layerzerolabs/toolbox-foundry/lib/forge-std/",
-  "ds-test/=node_modules/@layerzerolabs/toolbox-foundry/lib/ds-test/",
-  "solidity-bytes-utils/contracts/=node_modules/@layerzerolabs/toolbox-foundry/lib/solidity-bytes-utils/",
-]
 
 [fuzz]
-runs = 1000
+runs = 5000
 seed = "0xb2b2"
 
 [invariant]
-runs = 128
-depth = 40
+runs = 256
+depth = 64
 fail_on_revert = true
+
+[rpc_endpoints]
+base = "${BASE_RPC_URL}"
